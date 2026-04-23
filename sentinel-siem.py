@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import random
+import socket
+import struct
 import time
 import threading
 from datetime import datetime
@@ -8,10 +10,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import deque
 
-class SentinaxSIEM:
+class Sentinel:
     def __init__(self, root):
         self.root = root
-        self.root.title("Sentinax SIEM // Enterprise")
+        self.root.title("Sentinel // Enterprise")
         self.root.geometry("1400x900") 
         # Softer background color (Dark Slate)
         self.bg_main = "#0f172a" 
@@ -27,6 +29,10 @@ class SentinaxSIEM:
         self.event_count_this_second = 0
         self.is_running = True
         self.blocked_ips = set()
+        self.capture_on = False
+        self.capture_thread = None
+        self.capture_socket = None
+        self.packet_capture_status = tk.StringVar(value="Packet Capture: OFF")
         
         self.locations = ["All Regions", "Lagos, NG", "Berlin, DE", "Austin, US", "Tokyo, JP", "London, UK", "Akpugo, NG"]
         self.selected_location = tk.StringVar(value=self.locations[0])
@@ -67,8 +73,7 @@ class SentinaxSIEM:
         self.header = tk.Frame(self.root, bg=self.bg_main)
         self.header.pack(fill=tk.X, padx=30, pady=20)
         
-        tk.Label(self.header, text="Sentinax", fg="#f1f5f9", bg=self.bg_main, font=("Segoe UI", 18, "bold")).pack(side=tk.LEFT)
-        tk.Label(self.header, text="SIEM", fg=self.accent_blue, bg=self.bg_main, font=("Segoe UI", 18)).pack(side=tk.LEFT)
+        tk.Label(self.header, text="Sentinel", fg="#f1f5f9", bg=self.bg_main, font=("Segoe UI", 18, "bold")).pack(side=tk.LEFT)
         
         selector_frame = tk.Frame(self.header, bg=self.bg_main)
         selector_frame.pack(side=tk.LEFT, padx=40)
@@ -78,6 +83,24 @@ class SentinaxSIEM:
 
         self.status_label = tk.Label(self.header, text="● System Healthy", fg="#2dd4bf", bg=self.bg_main, font=("Segoe UI", 9))
         self.status_label.pack(side=tk.RIGHT)
+
+        capture_frame = tk.Frame(self.header, bg=self.bg_main)
+        capture_frame.pack(side=tk.RIGHT, padx=(0, 20))
+        self.capture_toggle = tk.Button(capture_frame,
+                                        text="Start Packet Capture",
+                                        command=self.toggle_packet_capture,
+                                        bg=self.bg_card,
+                                        fg="#f8fafc",
+                                        activebackground="#334155",
+                                        relief=tk.FLAT,
+                                        padx=8,
+                                        pady=4)
+        self.capture_toggle.pack(side=tk.LEFT)
+        tk.Label(capture_frame,
+                 textvariable=self.packet_capture_status,
+                 fg=self.text_dim,
+                 bg=self.bg_main,
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(10,0))
 
         # Main Container
         self.main_container = tk.Frame(self.root, bg=self.bg_main)
@@ -174,6 +197,79 @@ class SentinaxSIEM:
                 self.root.after(1000, self.update_graph)
             except: pass
 
+    def toggle_packet_capture(self):
+        if self.capture_on:
+            self.stop_packet_capture()
+        else:
+            self.start_packet_capture()
+
+    def start_packet_capture(self):
+        try:
+            self.capture_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+            self.capture_socket.setblocking(False)
+            self.capture_on = True
+            self.capture_toggle.config(text="Stop Packet Capture")
+            self.packet_capture_status.set("Packet Capture: ON")
+            self.log_soar("Packet capture started")
+            self.capture_thread = threading.Thread(target=self.run_packet_capture, daemon=True)
+            self.capture_thread.start()
+        except PermissionError:
+            messagebox.showwarning("Permission Required", "Packet capture requires root privileges. Running in simulation only.")
+            self.capture_on = False
+        except Exception as e:
+            messagebox.showwarning("Capture Error", f"Unable to start packet capture: {e}")
+            self.capture_on = False
+
+    def stop_packet_capture(self):
+        self.capture_on = False
+        self.packet_capture_status.set("Packet Capture: OFF")
+        self.capture_toggle.config(text="Start Packet Capture")
+        self.log_soar("Packet capture stopped")
+        if self.capture_socket:
+            try:
+                self.capture_socket.close()
+            except: pass
+            self.capture_socket = None
+
+    def run_packet_capture(self):
+        while self.capture_on and self.is_running:
+            try:
+                raw_data, _ = self.capture_socket.recvfrom(65535)
+            except BlockingIOError:
+                time.sleep(0.1)
+                continue
+            except OSError:
+                break
+            if not raw_data:
+                continue
+            packet = self.parse_packet(raw_data)
+            if packet:
+                ip, msg = packet
+                if ip in self.blocked_ips:
+                    continue
+                self.event_count_this_second += 1
+                ts = datetime.now().strftime("%H:%M:%S")
+                geo = random.choice(self.locations[1:])
+                is_critical = any(x in msg.lower() for x in ["scan", "icmp"])
+                try:
+                    self.root.after(0, self.update_ui, msg, ts, ip, geo, is_critical)
+                except: break
+
+    def parse_packet(self, raw_data):
+        if len(raw_data) < 34:
+            return None
+        eth_proto = struct.unpack('!H', raw_data[12:14])[0]
+        if eth_proto != 0x0800:
+            return None
+        ip_header = raw_data[14:34]
+        if len(ip_header) < 20:
+            return None
+        protocol = ip_header[9]
+        src_ip = socket.inet_ntoa(ip_header[12:16])
+        dst_ip = socket.inet_ntoa(ip_header[16:20])
+        packet_type = {1: "ICMP Packet", 6: "TCP Packet", 17: "UDP Packet"}.get(protocol, "IP Packet")
+        return src_ip, f"{packet_type} → {dst_ip}"
+
     def run_simulation(self):
         logs = [
             ("192.168.1.50", "User Login"),
@@ -217,6 +313,11 @@ class SentinaxSIEM:
 
     def on_closing(self):
         self.is_running = False
+        self.capture_on = False
+        if self.capture_socket:
+            try:
+                self.capture_socket.close()
+            except: pass
         try:
             for after_id in self.root.tk.eval('after info').split():
                 self.root.after_cancel(after_id)
@@ -225,5 +326,5 @@ class SentinaxSIEM:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = SentinaxSIEM(root)
+    app = Sentinel(root)
     root.mainloop()
