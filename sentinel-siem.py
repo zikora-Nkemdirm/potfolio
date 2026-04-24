@@ -5,6 +5,8 @@ import socket
 import struct
 import time
 import threading
+import os
+import ctypes
 from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -13,139 +15,104 @@ from collections import deque
 class Sentinel:
     def __init__(self, root):
         self.root = root
-        self.root.title("Sentinel // Enterprise")
+        self.root.title("Sentinel Enterprise - SIEM")
         self.root.geometry("1400x900") 
-        # Softer background color (Dark Slate)
+        
+        # Theme Colors
         self.bg_main = "#0f172a" 
         self.bg_card = "#1e293b"
-        self.accent_blue = "#6366f1" # Soft Indigo
-        self.accent_red = "#fb7185"  # Soft Rose
+        self.accent_blue = "#6366f1" 
+        self.accent_red = "#fb7185"  
         self.text_dim = "#94a3b8"
-        
         self.root.configure(bg=self.bg_main)
         
-        self.max_data_points = 25
+        # State Variables
+        self.max_data_points = 50 # Increased for better scrolling
         self.eps_data = deque([0] * self.max_data_points, maxlen=self.max_data_points)
         self.event_count_this_second = 0
         self.is_running = True
+        self.is_paused = False # NEW: Pause state
         self.blocked_ips = set()
         self.capture_on = False
-        self.capture_thread = None
-        self.capture_socket = None
-        self.packet_capture_status = tk.StringVar(value="Packet Capture: OFF")
         
-        self.locations = ["All Regions", "Lagos, NG", "Berlin, DE", "Austin, US", "Tokyo, JP", "London, UK", "Akpugo, NG"]
+        self.locations = ["All Regions", "Lagos, NG", "Berlin, DE", "Austin, US", "Tokyo, JP", "London, UK"]
         self.selected_location = tk.StringVar(value=self.locations[0])
+        self.packet_capture_status = tk.StringVar(value="Packet Capture: OFF")
         
         self.setup_styles()
         self.setup_layout()
         self.create_context_menu()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.sim_thread = threading.Thread(target=self.run_simulation, daemon=True)
-        self.sim_thread.start()
+        
+        # Background Threads
+        threading.Thread(target=self.run_simulation, daemon=True).start()
         self.update_graph()
 
     def setup_styles(self):
         self.style = ttk.Style()
         self.style.theme_use('clam')
-        
-        # Softer Treeview
-        self.style.configure("Treeview", 
-                             background=self.bg_card, 
-                             foreground="#e2e8f0", 
-                             fieldbackground=self.bg_card, 
-                             borderwidth=0, 
-                             font=("Segoe UI", 10),
-                             rowheight=30)
-        self.style.configure("Treeview.Heading", 
-                             background="#334155", 
-                             foreground=self.text_dim, 
-                             font=("Segoe UI", 9, "bold"),
-                             borderwidth=0)
-        self.style.map("Treeview", background=[('selected', '#334155')])
-        
-        # Soft Dropdown
-        self.style.configure("TMenubutton", background=self.bg_card, foreground="#f1f5f9", borderwidth=0)
+        self.style.configure("Treeview", background=self.bg_card, foreground="#e2e8f0", 
+                             fieldbackground=self.bg_card, rowheight=30)
+        self.style.configure("Treeview.Heading", background="#334155", foreground=self.text_dim)
 
     def setup_layout(self):
-        # Header with more padding
+        # Header
         self.header = tk.Frame(self.root, bg=self.bg_main)
         self.header.pack(fill=tk.X, padx=30, pady=20)
         
-        tk.Label(self.header, text="Sentinel", fg="#f1f5f9", bg=self.bg_main, font=("Segoe UI", 18, "bold")).pack(side=tk.LEFT)
+        tk.Label(self.header, text="SENTINEL", fg="#f1f5f9", bg=self.bg_main, font=("Segoe UI", 18, "bold")).pack(side=tk.LEFT)
         
-        selector_frame = tk.Frame(self.header, bg=self.bg_main)
-        selector_frame.pack(side=tk.LEFT, padx=40)
-        tk.Label(selector_frame, text="Scope:", fg=self.text_dim, bg=self.bg_main, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=5)
-        self.location_menu = ttk.OptionMenu(selector_frame, self.selected_location, *self.locations)
-        self.location_menu.pack(side=tk.LEFT)
+        # Controls Group
+        self.ctrl_frame = tk.Frame(self.header, bg=self.bg_main)
+        self.ctrl_frame.pack(side=tk.RIGHT)
 
-        self.status_label = tk.Label(self.header, text="● System Healthy", fg="#2dd4bf", bg=self.bg_main, font=("Segoe UI", 9))
-        self.status_label.pack(side=tk.RIGHT)
+        # PAUSE BUTTON
+        self.pause_btn = tk.Button(self.ctrl_frame, text="PAUSE SYSTEM", command=self.toggle_pause, 
+                                   bg=self.accent_blue, fg="white", relief=tk.FLAT, padx=15)
+        self.pause_btn.pack(side=tk.LEFT, padx=10)
 
-        capture_frame = tk.Frame(self.header, bg=self.bg_main)
-        capture_frame.pack(side=tk.RIGHT, padx=(0, 20))
-        self.capture_toggle = tk.Button(capture_frame,
-                                        text="Start Packet Capture",
-                                        command=self.toggle_packet_capture,
-                                        bg=self.bg_card,
-                                        fg="#f8fafc",
-                                        activebackground="#334155",
-                                        relief=tk.FLAT,
-                                        padx=8,
-                                        pady=4)
-        self.capture_toggle.pack(side=tk.LEFT)
-        tk.Label(capture_frame,
-                 textvariable=self.packet_capture_status,
-                 fg=self.text_dim,
-                 bg=self.bg_main,
-                 font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(10,0))
+        # PACKET CAPTURE BUTTON
+        self.cap_btn = tk.Button(self.ctrl_frame, text="START CAPTURE", command=self.authorize_and_start_capture, 
+                                 bg="#334155", fg="white", relief=tk.FLAT, padx=15)
+        self.cap_btn.pack(side=tk.LEFT, padx=10)
 
         # Main Container
         self.main_container = tk.Frame(self.root, bg=self.bg_main)
         self.main_container.pack(fill=tk.BOTH, expand=True, padx=30)
 
         # Stats Cards
-        self.threat_card = self.create_card(self.main_container, "Threat Level", "SECURE", 0, 0)
-        self.threat_card.config(fg="#2dd4bf")
-        self.sensor_card = self.create_card(self.main_container, "Active Sensors", "1,242", 0, 1)
-        self.geo_card = self.create_card(self.main_container, "Active Region", "Global", 0, 2)
+        self.threat_card = self.create_card(self.main_container, "System Status", "ACTIVE", 0, 0)
+        self.sensor_card = self.create_card(self.main_container, "Live EPS", "0", 0, 1)
+        self.geo_card = self.create_card(self.main_container, "Scope", "Global", 0, 2)
 
-        # Middle Content Area
+        # Middle Content (Treeview with Scrollbar)
         self.content_frame = tk.Frame(self.main_container, bg=self.bg_main)
         self.content_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=20)
 
-        # Log Treeview (Left)
-        self.log_frame = tk.Frame(self.content_frame, bg=self.bg_card, padx=10, pady=10)
-        self.log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
-        
-        columns = ("ts", "ip", "geo", "event")
-        self.log_tree = ttk.Treeview(self.log_frame, columns=columns, show="headings")
-        for col in columns:
-            self.log_tree.heading(col, text=col.upper())
-        self.log_tree.column("ts", width=100)
-        self.log_tree.column("ip", width=150)
-        self.log_tree.column("geo", width=150)
-        self.log_tree.column("event", width=400)
-        self.log_tree.pack(fill=tk.BOTH, expand=True)
-        self.log_tree.bind("<Button-3>", self.show_context_menu)
+        self.log_container = tk.Frame(self.content_frame, bg=self.bg_card)
+        self.log_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Mitigation Panel (Right)
-        self.soar_panel = tk.Frame(self.content_frame, bg=self.bg_card, width=280, padx=10, pady=10)
-        self.soar_panel.pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Label(self.soar_panel, text="MITIGATION LOG", fg=self.text_dim, bg=self.bg_card, font=("Segoe UI", 8, "bold")).pack(pady=(0,10))
-        self.soar_log = tk.Listbox(self.soar_panel, bg="#111827", fg="#94a3b8", font=("Consolas", 9), borderwidth=0, highlightthickness=0)
-        self.soar_log.pack(fill=tk.BOTH, expand=True)
+        columns = ("ts", "ip", "geo", "event")
+        self.log_tree = ttk.Treeview(self.log_container, columns=columns, show="headings")
+        for col in columns: self.log_tree.heading(col, text=col.upper())
         
-        # Graph (Bottom)
-        self.viz_frame = tk.Frame(self.main_container, bg=self.bg_card, padx=10, pady=10)
+        # Scrollbar for data analysis
+        self.scrollbar = ttk.Scrollbar(self.log_container, orient="vertical", command=self.log_tree.yview)
+        self.log_tree.configure(yscrollcommand=self.scrollbar.set)
+        self.log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Graph Section
+        self.viz_frame = tk.Frame(self.main_container, bg=self.bg_card, highlightthickness=1, highlightbackground="#334155")
         self.viz_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 30))
         
-        self.fig, self.ax = plt.subplots(figsize=(10, 1.8), facecolor=self.bg_card)
+        self.fig, self.ax = plt.subplots(figsize=(10, 2.5), facecolor=self.bg_card)
         self.ax.set_facecolor(self.bg_card)
-        self.line, = self.ax.plot(self.eps_data, color=self.accent_blue, linewidth=3, alpha=0.8)
-        self.ax.axis('off')
+        self.line, = self.ax.plot(self.eps_data, color=self.accent_blue, linewidth=2)
+        self.ax.grid(True, color="#334155", linestyle='--', linewidth=0.5)
+        
+        for spine in self.ax.spines.values(): spine.set_visible(False)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.viz_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -155,173 +122,108 @@ class Sentinel:
     def create_card(self, parent, title, value, r, c):
         card = tk.Frame(parent, bg=self.bg_card, highlightbackground="#334155", highlightthickness=1)
         card.grid(row=r, column=c, padx=8, sticky="nsew")
-        tk.Label(card, text=title.upper(), fg=self.text_dim, bg=self.bg_card, font=("Segoe UI", 8, "bold")).pack(pady=(15, 2))
-        val_label = tk.Label(card, text=value, fg="#f8fafc", bg=self.bg_card, font=("Segoe UI", 20, "bold"))
-        val_label.pack(pady=(0, 15))
+        tk.Label(card, text=title.upper(), fg=self.text_dim, bg=self.bg_card, font=("Segoe UI", 8, "bold")).pack(pady=(10, 2))
+        val_label = tk.Label(card, text=value, fg="#f8fafc", bg=self.bg_card, font=("Segoe UI", 16, "bold"))
+        val_label.pack(pady=(0, 10))
         return val_label
 
-    def create_context_menu(self):
-        self.context_menu = tk.Menu(self.root, tearoff=0, bg=self.bg_card, fg="#f8fafc", borderwidth=0)
-        self.context_menu.add_command(label="🚫 Block Address", command=self.action_block_ip)
-        self.context_menu.add_command(label="🔍 Investigation", command=self.action_whois)
+    def toggle_pause(self):
+        """Pauses or resumes the UI updates and simulations."""
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.pause_btn.config(text="RESUME SYSTEM", bg=self.accent_red)
+            self.threat_card.config(text="PAUSED", fg=self.accent_red)
+        else:
+            self.pause_btn.config(text="PAUSE SYSTEM", bg=self.accent_blue)
+            self.threat_card.config(text="ACTIVE", fg="#2dd4bf")
 
-    def show_context_menu(self, event):
-        item = self.log_tree.identify_row(event.y)
-        if item:
-            self.log_tree.selection_set(item)
-            self.context_menu.post(event.x_root, event.y_root)
+    def check_authorization(self):
+        """Verify if the app has administrative privileges for packet capture."""
+        try:
+            if os.name == 'nt': # Windows
+                return ctypes.windll.shell32.IsUserAnAdmin() != 0
+            else: # Linux/Mac
+                return os.getuid() == 0
+        except:
+            return False
 
-    def action_block_ip(self):
-        selected = self.log_tree.selection()[0]
-        ip = self.log_tree.item(selected)['values'][1]
-        self.blocked_ips.add(ip)
-        self.log_soar(f"Blocked: {ip}")
+    def authorize_and_start_capture(self):
+        if self.capture_on:
+            self.capture_on = False
+            self.cap_btn.config(text="START CAPTURE", bg="#334155")
+            return
 
-    def action_whois(self):
-        selected = self.log_tree.selection()[0]
-        ip = self.log_tree.item(selected)['values'][1]
-        self.log_soar(f"Whois: {ip}")
+        if not self.check_authorization():
+            messagebox.showerror("Auth Error", "Packet Capture requires Admin/Root privileges.\nPlease restart the app as Administrator.")
+            return
 
-    def log_soar(self, action):
-        ts = datetime.now().strftime("%H:%M")
-        self.soar_log.insert(0, f" {ts} | {action}")
+        self.capture_on = True
+        self.cap_btn.config(text="STOP CAPTURE", bg=self.accent_red)
+        threading.Thread(target=self.run_packet_capture, daemon=True).start()
+
+    def run_packet_capture(self):
+        """Simple raw socket capture (Generic IP packets)."""
+        try:
+            cap_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+            cap_sock.bind((socket.gethostbyname(socket.gethostname()), 0))
+            cap_sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            cap_sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+            
+            while self.capture_on:
+                raw_data, _ = cap_sock.recvfrom(65535)
+                if not self.is_paused:
+                    self.event_count_this_second += 1
+            
+            cap_sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+        except Exception as e:
+            self.capture_on = False
+            self.root.after(0, lambda: messagebox.showwarning("Capture Stopped", f"Interface Error: {e}"))
 
     def update_graph(self):
         if self.is_running:
-            try:
+            if not self.is_paused:
                 self.eps_data.append(self.event_count_this_second)
+                self.sensor_card.config(text=str(self.event_count_this_second))
                 self.event_count_this_second = 0 
+                
                 self.line.set_ydata(self.eps_data)
-                self.ax.set_ylim(0, max(self.eps_data) + 5)
+                curr_max = max(self.eps_data)
+                self.ax.set_ylim(0, curr_max + 10 if curr_max > 5 else 20)
+                
+                ticks = [0, 10, 20, 30, 40, 49]
+                labels = [f"-{50-t}s" for t in ticks]
+                self.ax.set_xticks(ticks)
+                self.ax.set_xticklabels(labels)
                 self.canvas.draw()
-                self.root.after(1000, self.update_graph)
-            except: pass
-
-    def toggle_packet_capture(self):
-        if self.capture_on:
-            self.stop_packet_capture()
-        else:
-            self.start_packet_capture()
-
-    def start_packet_capture(self):
-        try:
-            self.capture_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
-            self.capture_socket.setblocking(False)
-            self.capture_on = True
-            self.capture_toggle.config(text="Stop Packet Capture")
-            self.packet_capture_status.set("Packet Capture: ON")
-            self.log_soar("Packet capture started")
-            self.capture_thread = threading.Thread(target=self.run_packet_capture, daemon=True)
-            self.capture_thread.start()
-        except PermissionError:
-            messagebox.showwarning("Permission Required", "Packet capture requires root privileges. Running in simulation only.")
-            self.capture_on = False
-        except Exception as e:
-            messagebox.showwarning("Capture Error", f"Unable to start packet capture: {e}")
-            self.capture_on = False
-
-    def stop_packet_capture(self):
-        self.capture_on = False
-        self.packet_capture_status.set("Packet Capture: OFF")
-        self.capture_toggle.config(text="Start Packet Capture")
-        self.log_soar("Packet capture stopped")
-        if self.capture_socket:
-            try:
-                self.capture_socket.close()
-            except: pass
-            self.capture_socket = None
-
-    def run_packet_capture(self):
-        while self.capture_on and self.is_running:
-            try:
-                raw_data, _ = self.capture_socket.recvfrom(65535)
-            except BlockingIOError:
-                time.sleep(0.1)
-                continue
-            except OSError:
-                break
-            if not raw_data:
-                continue
-            packet = self.parse_packet(raw_data)
-            if packet:
-                ip, msg = packet
-                if ip in self.blocked_ips:
-                    continue
-                self.event_count_this_second += 1
-                ts = datetime.now().strftime("%H:%M:%S")
-                geo = random.choice(self.locations[1:])
-                is_critical = any(x in msg.lower() for x in ["scan", "icmp"])
-                try:
-                    self.root.after(0, self.update_ui, msg, ts, ip, geo, is_critical)
-                except: break
-
-    def parse_packet(self, raw_data):
-        if len(raw_data) < 34:
-            return None
-        eth_proto = struct.unpack('!H', raw_data[12:14])[0]
-        if eth_proto != 0x0800:
-            return None
-        ip_header = raw_data[14:34]
-        if len(ip_header) < 20:
-            return None
-        protocol = ip_header[9]
-        src_ip = socket.inet_ntoa(ip_header[12:16])
-        dst_ip = socket.inet_ntoa(ip_header[16:20])
-        packet_type = {1: "ICMP Packet", 6: "TCP Packet", 17: "UDP Packet"}.get(protocol, "IP Packet")
-        return src_ip, f"{packet_type} → {dst_ip}"
+            
+            self.root.after(1000, self.update_graph)
 
     def run_simulation(self):
-        logs = [
-            ("192.168.1.50", "User Login"),
-            ("45.67.23.11", "SQL Warning"),
-            ("102.89.34.122", "Network Scan"),
-            ("185.220.101.4", "Inbound Request"),
-            ("10.0.0.42", "File Access")
-        ]
         while self.is_running:
-            time.sleep(random.uniform(0.6, 1.8))
-            if not self.is_running: break
-            target = self.selected_location.get()
-            geo = random.choice(self.locations[1:]) 
-            if target != "All Regions" and geo != target: continue
-            ip, msg = random.choice(logs)
-            if ip in self.blocked_ips: continue 
-            self.event_count_this_second += 1
-            ts = datetime.now().strftime("%H:%M:%S")
-            is_critical = any(x in msg.lower() for x in ["warning", "scan"])
-            try: self.root.after(0, self.update_ui, msg, ts, ip, geo, is_critical)
-            except: break
+            if not self.is_paused:
+                time.sleep(random.uniform(0.3, 0.8))
+                ts = datetime.now().strftime("%H:%M:%S")
+                ip = f"192.168.1.{random.randint(2, 254)}"
+                geo = random.choice(self.locations[1:])
+                msg = random.choice(["Inbound TCP", "UDP Stream", "DDoS Attempt", "Auth Success"])
+                
+                self.event_count_this_second += 1
+                self.root.after(0, self.update_ui, msg, ts, ip, geo)
+            else:
+                time.sleep(0.5)
 
-    def update_ui(self, msg, ts, ip, geo, is_critical):
-        if not self.is_running: return
-        try:
-            item = self.log_tree.insert("", 0, values=(ts, ip, geo, msg))
-            if is_critical:
-                self.log_tree.tag_configure("crit", foreground=self.accent_red)
-                self.log_tree.item(item, tags=("crit",))
-                self.threat_card.config(text="ELEVATED", fg=self.accent_red)
-                self.root.after(3000, self.reset_threat_level)
-            if len(self.log_tree.get_children()) > 40:
-                self.log_tree.delete(self.log_tree.get_children()[-1])
-            self.geo_card.config(text=geo)
-        except: pass
+    def update_ui(self, msg, ts, ip, geo):
+        if self.is_paused: return
+        self.log_tree.insert("", 0, values=(ts, ip, geo, msg))
+        if len(self.log_tree.get_children()) > 100:
+            self.log_tree.delete(self.log_tree.get_children()[-1])
 
-    def reset_threat_level(self):
-        if self.is_running:
-            try: self.threat_card.config(text="SECURE", fg="#2dd4bf")
-            except: pass
+    def create_context_menu(self):
+        self.menu = tk.Menu(self.root, tearoff=0, bg=self.bg_card, fg="white")
+        self.menu.add_command(label="Block IP", command=lambda: messagebox.showinfo("Action", "IP Blocked"))
 
     def on_closing(self):
         self.is_running = False
-        self.capture_on = False
-        if self.capture_socket:
-            try:
-                self.capture_socket.close()
-            except: pass
-        try:
-            for after_id in self.root.tk.eval('after info').split():
-                self.root.after_cancel(after_id)
-        except: pass
         self.root.destroy()
 
 if __name__ == "__main__":
